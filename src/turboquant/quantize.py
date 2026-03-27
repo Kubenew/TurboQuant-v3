@@ -1,18 +1,16 @@
 """
 TurboQuant-v3: Group-wise INT4 quantization with AWQ-style scaling,
 protected FP16 channels, and optional low-rank SVD correction.
-
-This module is a clean, reusable port of the original notebook logic.
 """
 
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
 
-__all__ = ["turboquant_v3_compress", "turboquant_v3_decompress", "QuantConfig"]
+__all__ = ["QuantConfig", "turboquant_v3_compress", "turboquant_v3_decompress"]
 
 
 class QuantConfig:
-    """Configuration for TurboQuant-v3 compression."""
+    """Configuration for TurboQuant-v3."""
     def __init__(
         self,
         group_size: int = 64,
@@ -26,11 +24,10 @@ class QuantConfig:
         self.activation_aware = activation_aware
 
 
-# ====================== INT4 Pack / Unpack ======================
 def pack_int4(values_int8: np.ndarray) -> np.ndarray:
     """Pack int4 values (-8..7) into uint8 (2 values per byte)."""
     v = np.asarray(values_int8, dtype=np.int8)
-    assert np.all((v >= -8) & (v <= 7)), "Values must be in int4 range (-8..7)"
+    assert np.all((v >= -8) & (v <= 7))
     nibbles = (v & 0x0F).astype(np.uint8)
     if len(nibbles) % 2 != 0:
         nibbles = np.append(nibbles, 0)
@@ -39,7 +36,7 @@ def pack_int4(values_int8: np.ndarray) -> np.ndarray:
 
 
 def unpack_int4(packed_uint8: np.ndarray, length: int) -> np.ndarray:
-    """Unpack uint8 array back to int4 values (-8..7)."""
+    """Unpack uint8 back to int4 values."""
     p = np.asarray(packed_uint8, dtype=np.uint8)
     low = p & 0x0F
     high = (p >> 4) & 0x0F
@@ -52,9 +49,8 @@ def unpack_int4(packed_uint8: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
-# ====================== Low-Rank SVD Correction ======================
-def lowrank_correction(R: np.ndarray, rank: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute low-rank approximation U_corr, V_corr using SVD."""
+def lowrank_correction(R: np.ndarray, rank: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Low-rank SVD correction."""
     if rank <= 0:
         return None, None
     U, S, Vt = np.linalg.svd(R, full_matrices=False)
@@ -66,36 +62,30 @@ def lowrank_correction(R: np.ndarray, rank: int) -> Tuple[np.ndarray, np.ndarray
     return U_corr, V_corr
 
 
-# ====================== Main Compress / Decompress ======================
 def turboquant_v3_compress(
     W: np.ndarray,
     config: Optional[QuantConfig] = None,
 ) -> Dict[str, Any]:
-    """
-    Compress weight matrix W using TurboQuant-v3 algorithm.
-    
-    Returns a compact compressed representation (dict).
-    """
+    """Main compression function (ported from notebook)."""
     if config is None:
         config = QuantConfig()
 
     W = np.asarray(W, dtype=np.float32)
     out_dim, in_dim = W.shape
 
-    # Simulated / placeholder activation statistics (replace with real calibration in LLM)
+    # Activation-aware scaling (placeholder — replace with real calibration later)
     if config.activation_aware:
-        act_stats = np.random.lognormal(mean=0.0, sigma=0.6, size=in_dim).astype(np.float32)
+        act_stats = np.random.lognormal(0.0, 0.6, in_dim).astype(np.float32)
         act_stats /= (np.max(act_stats) + 1e-9)
     else:
         act_stats = np.ones(in_dim, dtype=np.float32)
 
-    # Select protected columns (most important input channels)
+    # Protected columns
     col_importance = np.mean(np.abs(W), axis=0) * act_stats
     k_keep = max(1, int(in_dim * config.outlier_keep_ratio))
     protected_cols = np.argsort(col_importance)[-k_keep:].astype(np.int32)
     protected_fp16 = W[:, protected_cols].astype(np.float16)
 
-    # Zero out protected columns in base matrix
     W_base = W.copy()
     W_base[:, protected_cols] = 0.0
 
@@ -123,7 +113,7 @@ def turboquant_v3_compress(
         packed_rows.append(row_packed_groups)
 
     # Temporary decompress for residual
-    tmp_comp = {
+    tmp_comp: Dict[str, Any] = {
         "shape": (out_dim, in_dim),
         "group_size": config.group_size,
         "protected_cols": protected_cols,
@@ -157,7 +147,7 @@ def turboquant_v3_compress(
 
 
 def turboquant_v3_decompress(comp: Dict[str, Any]) -> np.ndarray:
-    """Decompress compressed representation back to weight matrix."""
+    """Decompress to reconstructed weight matrix."""
     out_dim, in_dim = comp["shape"]
     group_size = comp["group_size"]
     groups = (in_dim + group_size - 1) // group_size
@@ -172,14 +162,9 @@ def turboquant_v3_decompress(comp: Dict[str, Any]) -> np.ndarray:
             q = unpack_int4(packed, length)
             W_rec[r, start:end] = q.astype(np.float32) * scale
 
-    # Add back protected FP16 channels
-    protected_cols = comp["protected_cols"]
-    W_rec[:, protected_cols] = comp["protected_fp16"].astype(np.float32)
+    W_rec[:, comp["protected_cols"]] = comp["protected_fp16"].astype(np.float32)
 
-    # Add low-rank correction if present
     if comp["rank"] > 0 and comp["U_corr"] is not None:
-        U_corr = comp["U_corr"].astype(np.float32)
-        V_corr = comp["V_corr"].astype(np.float32)
-        W_rec += U_corr @ V_corr
+        W_rec += comp["U_corr"].astype(np.float32) @ comp["V_corr"].astype(np.float32)
 
     return W_rec
