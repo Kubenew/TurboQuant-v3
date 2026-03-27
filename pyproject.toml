@@ -1,22 +1,28 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0", "wheel", "torch>=2.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "turboquant-v3"
-version = "0.3.0"
-description = "Ultra-efficient post-training INT4 quantization for LLMs with AWQ, protected FP16 channels, and low-rank SVD correction"
+name = "turboquant"
+version = "0.1.0"
+description = "Ultra-efficient post-training quantization for LLMs"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Kubenew", email = "your.email@example.com"},  # ← Update with real email if desired
+    {name = "Kubenew", email = "kubenew@example.com"}
 ]
-maintainers = [
-    {name = "Kubenew"},
+keywords = [
+    "quantization",
+    "llm",
+    "deep-learning",
+    "pytorch",
+    "transformers",
+    "awq",
+    "int4",
+    "machine-learning",
 ]
-keywords = ["llm", "quantization", "int4", "awq", "pytorch", "inference", "optimization"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -25,58 +31,63 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0.0",
-    "transformers>=4.30.0",
-    "numpy>=1.24.0",
-    "tqdm",
+    "numpy>=1.20.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
-    "black>=23.0",
-    "isort>=5.0",
-    "mypy",
-    "ruff",
-    "pre-commit",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
 ]
-cuda = [
-    # Add specific CUDA torch if needed (users usually install torch with CUDA separately)
+hf = [
+    "transformers>=4.30.0",
+    "accelerate>=0.20.0",
+]
+all = [
+    "transformers>=4.30.0",
+    "accelerate>=0.20.0",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/Kubenew/TurboQuant-v3"
-Repository = "https://github.com/Kubenew/TurboQuant-v3"
 Documentation = "https://github.com/Kubenew/TurboQuant-v3#readme"
-"Bug Tracker" = "https://github.com/Kubenew/TurboQuant-v3/issues"
+Repository = "https://github.com/Kubenew/TurboQuant-v3"
+Issues = "https://github.com/Kubenew/TurboQuant-v3/issues"
 
-[project.scripts]
-# If you want CLI entry points later, add them here
+[tool.setuptools.packages.find]
+where = ["src"]
 
-[tool.setuptools]
-packages = ["turboquant"]
-package-dir = {"" = "src"}
-include-package-data = true
-
-[tool.setuptools.package-data]
-"turboquant" = ["*.py", "*.so"]  # for future CUDA extensions
+[tool.setuptools.package-dir]
+"" = "src"
 
 [tool.black]
 line-length = 100
-target-version = ['py310']
+target-version = ["py310", "py311", "py312"]
 
 [tool.isort]
 profile = "black"
 line_length = 100
 
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = "test_*.py"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
