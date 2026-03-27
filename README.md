@@ -74,4 +74,23 @@ bibtex@misc{turboquant-v3,
   year = {2026},
   url = {https://github.com/Kubenew/TurboQuant-v3}
 }
+
+How to Use QuantizedLinear class that integrates perfectly with your TurboQuant-v3 algorithm.
+import torch
+import torch.nn as nn
+from turboquant import QuantConfig, QuantizedLinear
+
+# Example: Replace a linear layer
+linear = nn.Linear(1024, 512, bias=False)
+
+# Quantize it
+config = QuantConfig(group_size=64, outlier_keep_ratio=0.02, rank=8)
+quantized_layer = QuantizedLinear.from_linear(linear, config=config)
+
+# Use exactly like a normal nn.Linear
+x = torch.randn(4, 1024)
+output = quantized_layer(x)
+print(output.shape)  # torch.Size([4, 512])
 Star ⭐ if this helps your quantization work!
+
+
