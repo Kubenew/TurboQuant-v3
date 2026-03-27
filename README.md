@@ -36,3 +36,42 @@ The result is significantly better reconstruction quality than naive INT4 while 
 git clone https://github.com/Kubenew/TurboQuant-v3.git
 cd TurboQuant-v3
 pip install -e ".[dev]"
+Quickstart
+Pythonimport numpy as np
+from turboquant import QuantConfig, turboquant_v3_compress, turboquant_v3_decompress
+
+# Example weight matrix (e.g., from nn.Linear.weight)
+W = np.random.normal(0, 0.02, size=(512, 1024)).astype(np.float32)
+
+config = QuantConfig(
+    group_size=64,
+    outlier_keep_ratio=0.02,
+    rank=8,                    # set to 0 to disable correction
+    activation_aware=True
+)
+
+# Compress
+comp = turboquant_v3_compress(W, config)
+
+# Decompress / reconstruct
+W_rec = turboquant_v3_decompress(comp)
+
+# Metrics
+print(f"Compression ratio: {W.nbytes / comp_size(comp):.2f}x")  # add helper if needed
+print(f"MSE: {np.mean((W - W_rec)**2):.8f}")
+See examples/TurboQuant_v3_demo.ipynb for full experiments and visualizations.
+Project Status
+
+Core algorithm extracted from notebook into clean src/turboquant/ package
+Packing, AWQ-style scaling, protected channels, and SVD correction fully implemented
+Tests and CI coming soon
+
+Contributions welcome — especially real activation scale collection from HF models, PyTorch QuantizedLinear wrapper, and CUDA kernels.
+Citation
+bibtex@misc{turboquant-v3,
+  author = {Kubenew},
+  title = {TurboQuant-v3: INT4 + AWQ + Protected Channels + Low-Rank SVD},
+  year = {2026},
+  url = {https://github.com/Kubenew/TurboQuant-v3}
+}
+Star ⭐ if this helps your quantization work!
