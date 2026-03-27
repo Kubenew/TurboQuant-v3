@@ -1,3 +1,13 @@
-numpy
-matplotlib
-nbformat
+# Core dependencies
+torch>=2.1.0
+transformers>=4.35.0
+numpy>=1.24.0
+tqdm>=4.65.0
+
+# Optional / Development dependencies (install with pip install -e ".[dev]" instead)
+# pytest>=7.4.0
+# black>=23.0
+# isort>=5.12.0
+# mypy>=1.5.0
+# ruff>=0.1.0
+# pre-commit>=3.5.0
