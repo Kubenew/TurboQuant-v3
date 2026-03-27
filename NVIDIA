@@ -1,0 +1,50 @@
+Running TurboQuant-v3 on NVIDIA cards (like the RTX 3060 or 4090) is straightforward because the library includes pre-built CUDA kernels optimized for Ampere and Ada Lovelace architectures.
+Here is the step-by-step setup:
+1. Environment Preparation
+Ensure you have the latest NVIDIA drivers and Python 3.10+ installed.
+bash
+# Clone the repository
+git clone https://github.com
+cd turboquant-v3
+
+# Install dependencies
+pip install -r requirements.txt
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org
+Используйте код с осторожностью.
+
+2. Loading and "On-the-Fly" Quantization
+TurboQuant-v3 supports the Hugging Face interface, allowing you to load models (e.g., Llama-3-8B or Mistral) with a single command.
+python
+from turboquant import AutoTurboModelForCausalLM
+from transformers import AutoTokenizer
+
+model_id = "meta-llama/Meta-Llama-3-8B"
+
+# Load with automatic 3.5-bit quantization (optimal for 3060)
+model = AutoTurboModelForCausalLM.from_pretrained(
+    model_id, 
+    quantization_config={"bits": 3.5, "group_size": 128},
+    device_map="auto"
+)
+
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+Используйте код с осторожностью.
+
+3. Specific Tips for Your GPUs
+For RTX 3060 (12 GB VRAM):
+Llama-3-8B in 3.5-bit mode will take up only ~4.5–5 GB. This leaves plenty of room for a massive context window (since TurboQuant also compresses the KV cache by 6x).
+Use bits: 3 for maximum speed if extreme precision isn't your top priority.
+For RTX 4090 (24 GB VRAM):
+You can actually run Llama-3-70B! In 3.5-bit mode, it requires about 32 GB of VRAM, but using a hybrid mode (partially in VRAM, partially in system RAM) with TurboQuant’s fast kernels will still yield acceptable generation speeds.
+On this card, always enable the use_flash_attention_2=True flag, as TurboQuant-v3 is fully compatible with Flash Attention 2.
+4. Running Generation
+python
+prompt = "Write a Python code to sort a list."
+inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+
+outputs = model.generate(**inputs, max_new_tokens=100)
+print(tokenizer.decode(outputs, skip_special_tokens=True))
+
+
+Pro Performance Tip
+If you are using the RTX 4090, activate "Turbo Mode" in your config. This leverages specific Tensor Core optimizations for the 40-series, providing an additional 20–30% speed boost compared to standard quantization.
