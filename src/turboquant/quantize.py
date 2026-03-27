@@ -1,175 +1,185 @@
 """
-TurboQuant-v3: Modular INT4 Quantization with AWQ-style scaling,
+TurboQuant-v3: Group-wise INT4 quantization with AWQ-style scaling,
 protected FP16 channels, and optional low-rank SVD correction.
 
-Supports Hugging Face transformers models (linear layers only for now).
+This module is a clean, reusable port of the original notebook logic.
 """
 
-import torch
-import torch.nn as nn
-from typing import Optional, Dict, Tuple
 import numpy as np
-from tqdm import tqdm
+from typing import Dict, Any, Optional, Tuple
 
-__all__ = ["quantize_model", "QuantConfig"]
+__all__ = ["turboquant_v3_compress", "turboquant_v3_decompress", "QuantConfig"]
+
 
 class QuantConfig:
-    """Configuration for TurboQuant-v3 quantization."""
+    """Configuration for TurboQuant-v3 compression."""
     def __init__(
         self,
-        bits: int = 4,
-        group_size: int = 128,
-        use_awq: bool = True,
-        protect_channels: bool = True,
-        protect_ratio: float = 0.01,      # fraction of channels to protect in FP16
-        apply_svd_correction: bool = True,
-        svd_rank: int = 32,
-        calibration_samples: int = 128,
-        device: str = "cuda",
+        group_size: int = 64,
+        outlier_keep_ratio: float = 0.02,
+        rank: int = 8,
+        activation_aware: bool = True,
     ):
-        self.bits = bits
         self.group_size = group_size
-        self.use_awq = use_awq
-        self.protect_channels = protect_channels
-        self.protect_ratio = protect_ratio
-        self.apply_svd_correction = apply_svd_correction
-        self.svd_rank = svd_rank
-        self.calibration_samples = calibration_samples
-        self.device = device
+        self.outlier_keep_ratio = outlier_keep_ratio
+        self.rank = rank
+        self.activation_aware = activation_aware
 
 
-def _get_scale_and_zero_point(weight: torch.Tensor, group_size: int, bits: int = 4) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute per-group scale and zero-point for symmetric/asymmetric quantization."""
-    orig_shape = weight.shape
-    weight = weight.view(-1, group_size)
-    max_val = weight.abs().max(dim=1, keepdim=True)[0]
-    scale = max_val / (2 ** (bits - 1) - 1)
-    scale = torch.clamp(scale, min=1e-5)
-    zero_point = torch.zeros_like(scale)
-    return scale.view(-1, 1).expand_as(weight).view(orig_shape), zero_point
+# ====================== INT4 Pack / Unpack ======================
+def pack_int4(values_int8: np.ndarray) -> np.ndarray:
+    """Pack int4 values (-8..7) into uint8 (2 values per byte)."""
+    v = np.asarray(values_int8, dtype=np.int8)
+    assert np.all((v >= -8) & (v <= 7)), "Values must be in int4 range (-8..7)"
+    nibbles = (v & 0x0F).astype(np.uint8)
+    if len(nibbles) % 2 != 0:
+        nibbles = np.append(nibbles, 0)
+    packed = (nibbles[0::2] | (nibbles[1::2] << 4)).astype(np.uint8)
+    return packed
 
 
-def _awq_scale(weight: torch.Tensor, act_scales: torch.Tensor, group_size: int) -> torch.Tensor:
-    """Activation-aware weight scaling (AWQ-style)."""
-    if act_scales is None:
-        return torch.ones_like(weight)
-    act_scales = act_scales.view(-1, 1)
-    scale = act_scales.pow(0.5)
-    return scale
+def unpack_int4(packed_uint8: np.ndarray, length: int) -> np.ndarray:
+    """Unpack uint8 array back to int4 values (-8..7)."""
+    p = np.asarray(packed_uint8, dtype=np.uint8)
+    low = p & 0x0F
+    high = (p >> 4) & 0x0F
+    nibbles = np.empty(len(p) * 2, dtype=np.uint8)
+    nibbles[0::2] = low
+    nibbles[1::2] = high
+    nibbles = nibbles[:length]
+    out = nibbles.astype(np.int8)
+    out[out >= 8] -= 16
+    return out
 
 
-def _protect_outlier_channels(weight: torch.Tensor, protect_ratio: float = 0.01) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Protect top outlier channels by keeping them in FP16."""
-    if protect_ratio <= 0:
-        return weight, torch.zeros_like(weight), torch.zeros(weight.shape[0], dtype=torch.bool, device=weight.device)
-
-    channel_norms = weight.abs().max(dim=1)[0] if weight.dim() == 2 else weight.abs().max(dim=-1)[0]
-    num_protect = max(1, int(protect_ratio * weight.shape[0]))
-    _, protect_idx = torch.topk(channel_norms, num_protect)
-    
-    mask = torch.zeros(weight.shape[0], dtype=torch.bool, device=weight.device)
-    mask[protect_idx] = True
-    
-    protected_weight = weight.clone()
-    protected_weight[~mask] = 0.0   # zero out non-protected for main quant path
-    
-    return weight, protected_weight, mask
+# ====================== Low-Rank SVD Correction ======================
+def lowrank_correction(R: np.ndarray, rank: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute low-rank approximation U_corr, V_corr using SVD."""
+    if rank <= 0:
+        return None, None
+    U, S, Vt = np.linalg.svd(R, full_matrices=False)
+    U_k = U[:, :rank]
+    S_k = S[:rank]
+    Vt_k = Vt[:rank, :]
+    U_corr = (U_k * S_k).astype(np.float16)
+    V_corr = Vt_k.astype(np.float16)
+    return U_corr, V_corr
 
 
-def _low_rank_svd_correction(weight: torch.Tensor, error: torch.Tensor, rank: int) -> torch.Tensor:
-    """Apply low-rank SVD correction to recover quantization error."""
-    if rank <= 0 or error.norm() < 1e-6:
-        return torch.zeros_like(weight)
-    
-    U, S, Vh = torch.linalg.svd(error.float(), full_matrices=False)
-    correction = U[:, :rank] @ torch.diag(S[:rank]) @ Vh[:rank, :]
-    return correction.to(weight.dtype)
-
-
-@torch.no_grad()
-def quantize_linear_layer(
-    layer: nn.Linear,
-    config: QuantConfig,
-    act_scales: Optional[torch.Tensor] = None,
-) -> nn.Module:
-    """Quantize a single nn.Linear layer using TurboQuant-v3 method."""
-    weight = layer.weight.data.to(config.device).float()
-    orig_dtype = layer.weight.dtype
-
-    # Step 1: AWQ-style scaling
-    awq_scale = _awq_scale(weight, act_scales, config.group_size) if config.use_awq else torch.ones_like(weight)
-
-    scaled_weight = weight * awq_scale
-
-    # Step 2: Protect outlier channels
-    if config.protect_channels:
-        weight_to_quant, protected_weight, protect_mask = _protect_outlier_channels(
-            scaled_weight, config.protect_ratio
-        )
-    else:
-        weight_to_quant = scaled_weight
-        protected_weight = torch.zeros_like(scaled_weight)
-        protect_mask = torch.zeros(weight.shape[0], dtype=torch.bool, device=weight.device)
-
-    # Step 3: Group-wise INT4 quantization
-    scale, zero_point = _get_scale_and_zero_point(weight_to_quant, config.group_size, config.bits)
-
-    # Quantize to INT4 (stored as int8 for simplicity, can be packed later)
-    quantized_weight = torch.round(weight_to_quant / scale).clamp(
-        - (2 ** (config.bits - 1)), 2 ** (config.bits - 1) - 1
-    ).to(torch.int8)
-
-    # Step 4: Optional SVD correction on quantization error
-    if config.apply_svd_correction:
-        dequant_approx = quantized_weight.to(torch.float32) * scale
-        error = weight_to_quant - dequant_approx
-        correction = _low_rank_svd_correction(error, config.svd_rank)
-    else:
-        correction = torch.zeros_like(weight)
-
-    # Reconstruct final weight (protected + dequantized + correction)
-    final_weight = protected_weight + (quantized_weight.to(torch.float32) * scale) + correction
-
-    # Store quantized parameters
-    layer.weight.data = final_weight.to(orig_dtype)
-    layer.register_buffer("quantized_weight", quantized_weight.to("cpu"))
-    layer.register_buffer("scale", scale.to(orig_dtype).to("cpu"))
-    layer.register_buffer("protect_mask", protect_mask.to("cpu"))
-
-    # TODO: Add custom forward with dequantization for real deployment
-    return layer
-
-
-def quantize_model(
-    model: nn.Module,
+# ====================== Main Compress / Decompress ======================
+def turboquant_v3_compress(
+    W: np.ndarray,
     config: Optional[QuantConfig] = None,
-    calibration_data: Optional[torch.Tensor] = None,
-) -> nn.Module:
+) -> Dict[str, Any]:
     """
-    Quantize an entire model (or selected modules) with TurboQuant-v3.
+    Compress weight matrix W using TurboQuant-v3 algorithm.
     
-    Args:
-        model: Hugging Face or PyTorch model
-        config: Quantization configuration
-        calibration_data: Optional tensor for computing activation scales (batch of inputs)
-    
-    Returns:
-        Quantized model (in-place)
+    Returns a compact compressed representation (dict).
     """
     if config is None:
         config = QuantConfig()
 
-    model.to(config.device)
-    model.eval()
+    W = np.asarray(W, dtype=np.float32)
+    out_dim, in_dim = W.shape
 
-    # TODO: Compute activation scales from calibration_data (simplified placeholder)
-    act_scales_dict: Dict[str, torch.Tensor] = {}
+    # Simulated / placeholder activation statistics (replace with real calibration in LLM)
+    if config.activation_aware:
+        act_stats = np.random.lognormal(mean=0.0, sigma=0.6, size=in_dim).astype(np.float32)
+        act_stats /= (np.max(act_stats) + 1e-9)
+    else:
+        act_stats = np.ones(in_dim, dtype=np.float32)
 
-    # Quantize all Linear layers (extend to other modules if needed)
-    for name, module in tqdm(list(model.named_modules()), desc="Quantizing layers"):
-        if isinstance(module, nn.Linear) and "lm_head" not in name:  # usually skip lm_head
-            act_scale = act_scales_dict.get(name, None)
-            quantize_linear_layer(module, config, act_scale)
+    # Select protected columns (most important input channels)
+    col_importance = np.mean(np.abs(W), axis=0) * act_stats
+    k_keep = max(1, int(in_dim * config.outlier_keep_ratio))
+    protected_cols = np.argsort(col_importance)[-k_keep:].astype(np.int32)
+    protected_fp16 = W[:, protected_cols].astype(np.float16)
 
-    print(f"✅ TurboQuant-v3 quantization complete: {config.bits}-bit with group_size={config.group_size}")
-    return model
+    # Zero out protected columns in base matrix
+    W_base = W.copy()
+    W_base[:, protected_cols] = 0.0
+
+    groups = (in_dim + config.group_size - 1) // config.group_size
+    packed_rows = []
+    scales = np.zeros((out_dim, groups), dtype=np.float16)
+
+    for r in range(out_dim):
+        row = W_base[r]
+        row_packed_groups = []
+        for g in range(groups):
+            start = g * config.group_size
+            end = min(start + config.group_size, in_dim)
+            block = row[start:end]
+            weighted = np.abs(block) * act_stats[start:end]
+            max_abs = np.max(weighted) + 1e-9
+            scale = (max_abs / 7.0).astype(np.float16)
+
+            q = np.round(block / float(scale)).astype(np.int8)
+            q = np.clip(q, -8, 7)
+
+            packed = pack_int4(q)
+            scales[r, g] = scale
+            row_packed_groups.append((start, end, packed))
+        packed_rows.append(row_packed_groups)
+
+    # Temporary decompress for residual
+    tmp_comp = {
+        "shape": (out_dim, in_dim),
+        "group_size": config.group_size,
+        "protected_cols": protected_cols,
+        "protected_fp16": protected_fp16,
+        "packed_rows": packed_rows,
+        "scales": scales,
+        "rank": 0,
+        "U_corr": None,
+        "V_corr": None,
+    }
+    Wq = turboquant_v3_decompress(tmp_comp)
+
+    # Low-rank correction
+    if config.rank > 0:
+        R = (W - Wq).astype(np.float32)
+        U_corr, V_corr = lowrank_correction(R, config.rank)
+    else:
+        U_corr = V_corr = None
+
+    return {
+        "shape": (out_dim, in_dim),
+        "group_size": config.group_size,
+        "protected_cols": protected_cols,
+        "protected_fp16": protected_fp16,
+        "packed_rows": packed_rows,
+        "scales": scales,
+        "rank": config.rank,
+        "U_corr": U_corr,
+        "V_corr": V_corr,
+    }
+
+
+def turboquant_v3_decompress(comp: Dict[str, Any]) -> np.ndarray:
+    """Decompress compressed representation back to weight matrix."""
+    out_dim, in_dim = comp["shape"]
+    group_size = comp["group_size"]
+    groups = (in_dim + group_size - 1) // group_size
+
+    W_rec = np.zeros((out_dim, in_dim), dtype=np.float32)
+
+    for r in range(out_dim):
+        for g in range(groups):
+            start, end, packed = comp["packed_rows"][r][g]
+            scale = float(comp["scales"][r, g])
+            length = end - start
+            q = unpack_int4(packed, length)
+            W_rec[r, start:end] = q.astype(np.float32) * scale
+
+    # Add back protected FP16 channels
+    protected_cols = comp["protected_cols"]
+    W_rec[:, protected_cols] = comp["protected_fp16"].astype(np.float32)
+
+    # Add low-rank correction if present
+    if comp["rank"] > 0 and comp["U_corr"] is not None:
+        U_corr = comp["U_corr"].astype(np.float32)
+        V_corr = comp["V_corr"].astype(np.float32)
+        W_rec += U_corr @ V_corr
+
+    return W_rec
