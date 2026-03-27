@@ -1,6 +1,6 @@
 # TurboQuant-v3
 
-**Ultra-efficient post-training INT4 quantization for LLMs**  
+**Ultra-efficient post-training quantization for large language models — no fine-tuning required.**  
 Group-wise INT4 + AWQ-style activation scaling + Protected FP16 channels + Optional low-rank SVD correction
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
